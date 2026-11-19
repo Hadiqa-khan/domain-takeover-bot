@@ -47,9 +47,12 @@ jobs:
           IFS=',' read -ra items <<< "$DOMAINS"
           for d in "${items[@]}"; do
             d="$(printf '%s' "$d" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+            # Accept pasted URLs: drop the scheme, any path, port, and trailing dot
+            d="${d#http://}"; d="${d#https://}"
+            d="${d%%/*}"; d="${d%%\?*}"; d="${d%%:*}"; d="${d%.}"
             [ -z "$d" ] && continue
             if [[ ! "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; then
-              echo "::error::Input contains an invalid domain name"
+              echo "::error::Invalid domain in input. Use bare root domains like example.com, separated by commas."
               exit 1
             fi
             echo "$d" >> targets.txt
