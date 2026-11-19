@@ -1,0 +1,189 @@
+name: Subdomain Takeover Scan
+
+# Run on demand from the Actions tab. Only scan domains you own or are authorized to test.
+on:
+  workflow_dispatch:
+    inputs:
+      domains:
+        description: "Root domains to scan, comma-separated (only domains you own or are authorized to test)"
+        required: true
+        type: string
+      notify_slack:
+        description: "Send Slack alerts (needs the SLACK_WEBHOOK_URL secret)"
+        required: false
+        type: boolean
+        default: false
+
+# No permissions by default; the job asks only for what it needs.
+permissions: {}
+
+concurrency:
+  group: takeover-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # Tools are pinned to exact releases and verified by SHA-256 before they run.
+      SUBFINDER_VERSION: "2.17.0"
+      SUBFINDER_SHA256: "a39c3e5c7a26ef3c430915c4d6cbf7716a00f26769a75e9405aba796142eba37" # subfinder_2.17.0_linux_amd64.zip
+      SUBDOMINATOR_VERSION: "v1.72"
+      SUBDOMINATOR_SHA256: "400d8f12586e2b15606c13e2f575830dee866bb34f499b24a8e3c46d234bf6f7" # computed locally; the release publishes no checksum
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Validate target domains
+        env:
+          DOMAINS: ${{ inputs.domains }} # passed via env, never interpolated into the script
+        run: |
+          set -euo pipefail
+          : > targets.txt
+          IFS=',' read -ra items <<< "$DOMAINS"
+          for d in "${items[@]}"; do
+            d="$(printf '%s' "$d" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+            [ -z "$d" ] && continue
+            if [[ ! "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; then
+              echo "::error::Input contains an invalid domain name"
+              exit 1
+            fi
+            echo "$d" >> targets.txt
+          done
+          sort -u -o targets.txt targets.txt
+          if [ ! -s targets.txt ]; then
+            echo "::error::No valid domains given"
+            exit 1
+          fi
+          echo "Scanning $(wc -l < targets.txt) root domain(s)"
+
+      - name: Install pinned tools
+        run: |
+          set -euo pipefail
+          mkdir -p tools && cd tools
+
+          # subfinder: official release zip, checked against the SHA-256 GitHub publishes for it
+          zip="subfinder_${SUBFINDER_VERSION}_linux_amd64.zip"
+          curl -sSfLo "$zip" "https://github.com/projectdiscovery/subfinder/releases/download/v${SUBFINDER_VERSION}/${zip}"
+          echo "${SUBFINDER_SHA256}  ${zip}" | sha256sum -c -
+          unzip -oq "$zip" subfinder
+          sudo install -m 0755 subfinder /usr/local/bin/subfinder
+
+          # Subdominator: pinned release; verified when a checksum is set
+          curl -sSfLo Subdominator "https://github.com/Stratus-Security/Subdominator/releases/download/${SUBDOMINATOR_VERSION}/Subdominator"
+          if [ -n "${SUBDOMINATOR_SHA256}" ]; then
+            echo "${SUBDOMINATOR_SHA256}  Subdominator" | sha256sum -c -
+          else
+            echo "::warning::SUBDOMINATOR_SHA256 is not set; the Subdominator binary was not verified"
+            sha256sum Subdominator
+          fi
+          sudo install -m 0755 Subdominator /usr/local/bin/Subdominator
+
+          subfinder -version
+
+      - name: Discover subdomains
+        run: |
+          set -euo pipefail
+          subfinder -dL targets.txt -silent -o discovered_subdomains.txt || true
+          touch discovered_subdomains.txt
+          sort -u -o discovered_subdomains.txt discovered_subdomains.txt
+          echo "Discovered $(wc -l < discovered_subdomains.txt) subdomain(s)"
+
+      - name: Check for takeovers
+        id: scan
+        run: |
+          set -euo pipefail
+          : > findings.txt
+          if [ -s discovered_subdomains.txt ]; then
+            Subdominator -l discovered_subdomains.txt -o findings.txt
+          fi
+          if [ -s findings.txt ]; then
+            echo "vulnerable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vulnerable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build CSV inventory
+        if: always()
+        run: |
+          set -euo pipefail
+          DATE="$(date -u +%Y-%m-%d)"
+          echo "subdomain,scan_date" > inventory.csv
+          if [ -f discovered_subdomains.txt ]; then
+            while read -r sub; do
+              [ -n "$sub" ] && echo "$sub,$DATE" >> inventory.csv
+            done < discovered_subdomains.txt
+          fi
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Subdomain takeover scan"
+            echo "- Subdomains discovered: $( [ -f discovered_subdomains.txt ] && wc -l < discovered_subdomains.txt || echo 0 )"
+            echo "- Possible takeovers: $( [ -f findings.txt ] && wc -l < findings.txt || echo 0 )"
+            if [ -s findings.txt ]; then
+              echo
+              echo "Verify each finding manually before acting:"
+              echo
+              sed 's/^/    /' findings.txt
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: takeover-scan-${{ github.run_id }}
+          path: |
+            inventory.csv
+            findings.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Open or update GitHub issue
+        if: steps.scan.outputs.vulnerable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Possible subdomain takeover detected"
+          {
+            echo "Dangling DNS records were flagged for these subdomains. Verify each one manually before acting."
+            echo
+            sed 's/^/    /' findings.txt
+            echo
+            echo "Run: $RUN_URL"
+          } > body.md
+          gh label create security --color B60205 --force > /dev/null
+          EXISTING="$(gh issue list --state open --label security --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --body-file body.md --label security --assignee "$GITHUB_ACTOR"
+          fi
+
+      - name: Slack alert
+        if: steps.scan.outputs.vulnerable == 'true' && inputs.notify_slack && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          set -euo pipefail
+          payload="$(jq -n --rawfile findings findings.txt --arg run "$RUN_URL" \
+            '{text: ("*Possible subdomain takeover detected*\n```" + $findings + "```\nRun: " + $run)}')"
+          curl -sSf -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+
+      - name: Slack run summary
+        if: always() && inputs.notify_slack && env.SLACK_WEBHOOK_URL != ''
+        env:
+          JOB_STATUS: ${{ job.status }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -n --arg status "$JOB_STATUS" --arg run "$RUN_URL" --arg csv "$ARTIFACT_URL" \
+            '{text: ("Takeover scan finished: " + $status + "\nResults: " + (if $csv == "" then "none uploaded" else $csv end) + "\nRun: " + $run)}')"
+          curl -sSf -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
