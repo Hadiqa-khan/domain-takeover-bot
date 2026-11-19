@@ -36,8 +36,16 @@ jobs:
       SUBDOMINATOR_SHA256: "400d8f12586e2b15606c13e2f575830dee866bb34f499b24a8e3c46d234bf6f7" # computed locally; the release publishes no checksum
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # On a public repo, run pages, issues and artifacts are visible to others,
+      # so detailed results are kept out of them (Slack alerts still work).
+      IS_PUBLIC: ${{ github.event.repository.private == false }}
 
     steps:
+      - name: Public repository notice
+        if: env.IS_PUBLIC == 'true'
+        run: |
+          echo "::notice::This repository is public, so findings are not written to the run summary, issues or artifacts. Run the scan from a private copy to keep full results."
+
       - name: Validate target domains
         env:
           DOMAINS: ${{ inputs.domains }} # passed via env, never interpolated into the script
@@ -91,7 +99,8 @@ jobs:
       - name: Discover subdomains
         run: |
           set -euo pipefail
-          subfinder -dL targets.txt -silent -o discovered_subdomains.txt || true
+          # Results go to the file only, never to the public job log
+          subfinder -dL targets.txt -silent -o discovered_subdomains.txt > /dev/null || true
           touch discovered_subdomains.txt
           sort -u -o discovered_subdomains.txt discovered_subdomains.txt
           echo "Discovered $(wc -l < discovered_subdomains.txt) subdomain(s)"
@@ -102,7 +111,7 @@ jobs:
           set -euo pipefail
           : > findings.txt
           if [ -s discovered_subdomains.txt ]; then
-            Subdominator -l discovered_subdomains.txt -o findings.txt
+            Subdominator -l discovered_subdomains.txt -o findings.txt > /dev/null
           fi
           if [ -s findings.txt ]; then
             echo "vulnerable=true" >> "$GITHUB_OUTPUT"
@@ -129,7 +138,10 @@ jobs:
             echo "## Subdomain takeover scan"
             echo "- Subdomains discovered: $( [ -f discovered_subdomains.txt ] && wc -l < discovered_subdomains.txt || echo 0 )"
             echo "- Possible takeovers: $( [ -f findings.txt ] && wc -l < findings.txt || echo 0 )"
-            if [ -s findings.txt ]; then
+            if [ "$IS_PUBLIC" = "true" ]; then
+              echo
+              echo "Details are hidden because this repository is public. Run from a private copy to see them here."
+            elif [ -s findings.txt ]; then
               echo
               echo "Verify each finding manually before acting:"
               echo
@@ -139,7 +151,7 @@ jobs:
 
       - name: Upload results
         id: upload
-        if: always()
+        if: always() && env.IS_PUBLIC != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: takeover-scan-${{ github.run_id }}
@@ -150,7 +162,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Open or update GitHub issue
-        if: steps.scan.outputs.vulnerable == 'true'
+        if: steps.scan.outputs.vulnerable == 'true' && env.IS_PUBLIC != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
