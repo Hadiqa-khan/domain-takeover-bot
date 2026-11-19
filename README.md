@@ -2,7 +2,7 @@
 
 A GitHub Actions workflow that finds subdomains for domains you own and checks them for subdomain takeover.
 
-I originally built this to run every week against the domains I was responsible for, so dangling DNS records got caught before someone else found them. This is a cleaned-up version you can run on demand against your own domains.
+I built this to keep an eye on forgotten DNS records on domains I own, so a dangling record gets caught before someone else finds it. You can run it on demand against your own domains.
 
 ## The problem it catches
 
@@ -23,7 +23,7 @@ These records pile up quietly as teams spin services up and down, which is why i
 
 ## Keep your results private
 
-On a public repository, anyone can open a workflow run and see the domains you entered, the run summary and any issues it opens. I found this out on my first real scan of the public version. So:
+On a public repository, anyone can open a workflow run and see the domains you entered, the run summary and any issues it opens. I found this out on my first real scan. So:
 
 - **Run it from a private copy.** Use **Use this template** (or GitHub's import tool) to create a *private* repository with this workflow. A fork of a public repo can't be made private.
 - **If it does run on a public repo,** the workflow notices and holds back the details. The run summary shows counts only, and no issue or results file is created. Findings still go to Slack if you turn that on.
@@ -69,4 +69,4 @@ The workflow handles untrusted input (the domains you type, and DNS data from th
 
 - Add [nuclei](https://github.com/projectdiscovery/nuclei)'s takeover templates as a second checker. Subdominator's last release was in 2024, so its fingerprints may miss newer services.
 - Compare each run with the previous inventory and alert on new subdomains, not just takeovers.
-- Bring back a weekly `schedule` trigger with the domain list stored as a repository variable, for anyone running it continuously.
+- Add a weekly `schedule` trigger with the domain list stored as a repository variable, for anyone running it continuously.
