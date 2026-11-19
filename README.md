@@ -2,7 +2,7 @@
 
 A GitHub Actions workflow that finds subdomains for domains you own and checks them for subdomain takeover.
 
-I originally built this to run every week against the domains I was responsible for at work, so dangling DNS records got caught before someone else found them. This is a cleaned-up version you can run on demand against your own domains.
+I originally built this to run every week against the domains I was responsible for, so dangling DNS records got caught before someone else found them. This is a cleaned-up version you can run on demand against your own domains.
 
 ## The problem it catches
 
